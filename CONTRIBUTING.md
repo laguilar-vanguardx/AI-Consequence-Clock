@@ -26,6 +26,10 @@ node tests/sensitivity.test.js
 node tests/methodology-render.test.js
 node tests/provenance.test.js
 node tests/source-graph.test.js
+node tests/consumer-policy.test.js
+node tests/provenance-history.test.js
+node tests/verify-provenance-quotes.test.js
+node tests/codeowners.test.js
 ```
 
 The same checks run automatically on every pull request, along with a check that the generated CSV and baseline match the JSON.
@@ -34,11 +38,11 @@ If you changed a record, the suite fails until you run `node tests/update-expect
 
 Run the validator first. It catches the class of error the arithmetic cannot: a record whose `verification_status` reads `verified` in lowercase computes perfectly and silently drops out of every headline total, so the clock gets quieter and nothing reports an error anywhere. Field values are case-sensitive on purpose.
 
-If you add a source, run `node tests/find-archives.js` so the URL is checked against the Internet Archive and a snapshot is recorded where one exists. It skips sources already resolved, so it will only look up yours. If the lookup fails, leave the fields untouched and say so in the pull request. Never write "no snapshot" for a lookup that did not complete — recording an absence you did not observe is the one thing this project cannot do.
+If you add a source, run `node tests/find-archives.js` so the URL is checked against the Internet Archive and a snapshot is recorded where one exists. It skips sources already resolved, so it will only look up yours. It edits the record, so run `node tests/update-expected.js` afterwards: `data/summary.json` publishes a checksum of every record's content. If the lookup fails, leave the fields untouched and say so in the pull request. Never write "no snapshot" for a lookup that did not complete — recording an absence you did not observe is the one thing this project cannot do.
 
 Prefer a source URL that a web archive can actually capture. Authoritative JSON APIs give the most exact data and the least durable citation: every unarchivable source in this dataset is an API endpoint. If the only good source is an API, say so in `source_quality_basis` rather than pretending the link will outlive the service.
 
-A source may carry an optional `provenance` annotation saying whether it is the original evidence or derives from another source. Read `docs/annotating-provenance.md` first. Annotate only what the source itself states, cite it in `note`, and when in doubt leave the source unannotated, which means `UNKNOWN`. Never generate these annotations with a tool.
+A source may carry an optional `provenance` annotation saying whether it is the original evidence or derives from another source. Read `docs/annotating-provenance.md` first. Annotate only what the source itself states, and when in doubt leave the source unannotated, which means `UNKNOWN`. Every claim needs a short quote and a Wayback Machine snapshot of the source, every outside origin must be registered in `data/external-roots.json`, and the change is a revision whose `change_log` entry lists `"changed": ["provenance"]`. Never generate these annotations with a tool.
 
 If you changed a record, regenerate the CSV with `node tests/export-csv.js` and commit it, so the generated file never disagrees with the JSON it came from.
 

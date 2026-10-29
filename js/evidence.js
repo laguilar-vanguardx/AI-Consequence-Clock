@@ -426,13 +426,60 @@
   }
 
   /*
+   * One serialization for the same data in Node and in the browser: object keys sorted
+   * by UTF-16 code unit at every level, as in RFC 8785, and numbers as JSON.stringify
+   * prints them. Hashing is left to the caller, so this module stays synchronous and pure.
+   */
+  function canonicalJson(value) {
+    if (value === null || value === undefined || typeof value !== "object") {
+      return JSON.stringify(value === undefined ? null : value);
+    }
+    if (Array.isArray(value)) {
+      return "[" + value.map(canonicalJson).join(",") + "]";
+    }
+    var fields = Object.keys(value)
+      .sort()
+      .filter(function (key) {
+        return value[key] !== undefined;
+      })
+      .map(function (key) {
+        return JSON.stringify(key) + ":" + canonicalJson(value[key]);
+      });
+    return "{" + fields.join(",") + "}";
+  }
+
+  /*
+   * recordHashes is [{ id, hash }], one hash per record; the caller hashes the text this
+   * returns. Lines are sorted, so the order of records in the file does not matter.
+   */
+  function contentChecksumText(recordHashes) {
+    return recordHashes
+      .map(function (entry) {
+        return String(entry.id) + ":" + String(entry.hash);
+      })
+      .sort()
+      .join("\n");
+  }
+
+  /* A 64-character hex string, as SHA-256 prints. Anything else means "not available". */
+  function isDigest(value) {
+    return /^[0-9a-f]{64}$/i.test(String(value || ""));
+  }
+
+  /*
    * The footer says whether the browser recomputation agrees with data/summary.json.
    * The old check used only a checksum of all incident ids, so changing a record from
    * PRIMARY to ROUNDUP left the digest unchanged while the headline count moved. Compare
    * the published totals themselves, and reserve checksum-only states for actual checksum
    * availability/fetch problems.
+   *
+   * `digests` is either the id digest as a string, as callers have always passed it, or
+   * { idDigest, contentDigest }. The content digest covers every field of every record,
+   * so it catches an edit the id digest cannot see.
    */
-  function comparePublishedSummary(summary, published, digest) {
+  function comparePublishedSummary(summary, published, digests) {
+    var given = digests !== null && typeof digests === "object" ? digests : { idDigest: digests };
+    var digest = given.idDigest;
     if (!published) {
       return {
         status: "unavailable",
@@ -448,8 +495,11 @@
       return json(expected[key]) !== json(actual[key]);
     });
 
-    if (/^[0-9a-f]{64}$/i.test(String(digest || ""))) {
-      if (published.dataset_checksum_sha256 !== digest) mismatches.push("dataset_checksum_sha256");
+    if (isDigest(digest) && published.dataset_checksum_sha256 !== digest) {
+      mismatches.push("dataset_checksum_sha256");
+    }
+    if (isDigest(given.contentDigest) && published.dataset_content_sha256 !== given.contentDigest) {
+      mismatches.push("dataset_content_sha256");
     }
 
     if (mismatches.length) {
@@ -461,7 +511,7 @@
       };
     }
 
-    if (!/^[0-9a-f]{64}$/i.test(String(digest || ""))) {
+    if (!isDigest(digest)) {
       return {
         status: "matches_without_checksum",
         matches: true,
@@ -606,9 +656,49 @@
   var PROVENANCE_VERDICTS = VERDICT_DEFINITIONS.map(function (definition) {
     return definition.id;
   });
+  // Frozen so no consumer can add a verdict, or rename one, at runtime.
+  VERDICT_DEFINITIONS.forEach(Object.freeze);
+  Object.freeze(VERDICT_DEFINITIONS);
+  Object.freeze(PROVENANCE_VERDICTS);
 
   function verdictDefinition(verdict) {
     return VERDICT_DEFINITIONS[PROVENANCE_VERDICTS.indexOf(verdict)] || null;
+  }
+
+  /*
+   * The one verdict that permits reliance. An allow-list, not a deny-list: any other value,
+   * including one added in a later version, is "not confirmed".
+   */
+  function isConfirmed(verdict) {
+    return verdict === "INDEPENDENT_CONFIRMED";
+  }
+
+  var RELIANCE_REASONS = Object.freeze({
+    NOT_CONFIRMED: "NOT_CONFIRMED",
+    PENDING_SOURCES: "PENDING_SOURCES"
+  });
+
+  /* Whether a sourceRoots() result may be relied on, and if not, why, as stable codes. */
+  function relianceDecision(roots) {
+    var verdict = roots && typeof roots.verdict === "string" ? roots.verdict : null;
+    if (isConfirmed(verdict)) return { allowed: true, verdict: verdict, reasons: [] };
+    var reasons = [
+      {
+        code: RELIANCE_REASONS.NOT_CONFIRMED,
+        message: "Only INDEPENDENT_CONFIRMED permits reliance. This record is " + String(verdict) + "."
+      }
+    ];
+    var pending = roots && Array.isArray(roots.pending_sources) ? roots.pending_sources : [];
+    if (pending.length) {
+      reasons.push({
+        code: RELIANCE_REASONS.PENDING_SOURCES,
+        message: "Sources still to annotate before a verdict can be reached.",
+        sources: pending.map(function (source) {
+          return typeof source.id === "string" ? source.id : String(source.url || "");
+        })
+      });
+    }
+    return { allowed: false, verdict: verdict, reasons: reasons };
   }
 
   function normalizePublisher(value) {
@@ -1095,6 +1185,8 @@
     groupByAxis: groupByAxis,
     averageDisclosureLag: averageDisclosureLag,
     comparePublishedSummary: comparePublishedSummary,
+    canonicalJson: canonicalJson,
+    contentChecksumText: contentChecksumText,
     vulnerabilityDefinition: vulnerabilityDefinition,
     filterRecords: filterRecords,
     filterOptions: filterOptions,
@@ -1104,6 +1196,9 @@
     PROVENANCE_KINDS: PROVENANCE_KINDS,
     PROVENANCE_VERDICTS: PROVENANCE_VERDICTS,
     verdictDefinition: verdictDefinition,
+    isConfirmed: isConfirmed,
+    RELIANCE_REASONS: RELIANCE_REASONS,
+    relianceDecision: relianceDecision,
     EXTERNAL_ROOT_PREFIXES: EXTERNAL_ROOT_PREFIXES,
     EXTERNAL_ROOT_KEY: EXTERNAL_ROOT_KEY,
     SOURCE_ID: SOURCE_ID,

@@ -12,14 +12,15 @@
 
 const fs = require("fs");
 const path = require("path");
-const crypto = require("crypto");
 const E = require(path.join(__dirname, "..", "js", "evidence.js"));
+const { idDigest, contentDigest } = require(path.join(__dirname, "..", "scripts", "content-digest.js"));
 
 const root = path.join(__dirname, "..");
 const dataset = JSON.parse(fs.readFileSync(path.join(root, "data", "incidents.json"), "utf8"));
 const today = new Date().toISOString().slice(0, 10);
 const summary = E.derive(dataset, "2026-09-28");
 const headline = dataset.incidents.filter(E.isHeadlineEligible);
+const audit = E.provenanceSummary(dataset.incidents);
 
 function axisMap(name) {
   return summary.axes[name].reduce((acc, g) => {
@@ -58,6 +59,8 @@ const expected = {
     acc[name] = axisMap(name);
     return acc;
   }, {}),
+  // Pinned so that annotating a source shows, in review, which verdicts it moved.
+  provenance: { verdicts: audit.verdicts, ids: audit.ids },
   sensitivity: E.sensitivityTable(dataset.incidents).map((r) => ({
     id: r.id,
     total: r.total,
@@ -78,10 +81,9 @@ const published = {
   record_count: summary.record_count,
   eligible_record_count: summary.headline_count,
   record_ids: summary.headline_ids.slice().sort(),
-  dataset_checksum_sha256: crypto
-    .createHash("sha256")
-    .update(dataset.incidents.map((i) => i.id).sort().join(","))
-    .digest("hex"),
+  dataset_checksum_sha256: idDigest(dataset.incidents),
+  content_checksum_input: "SHA-256 of the sorted id:hash lines, one SHA-256 per record over its canonical JSON",
+  dataset_content_sha256: contentDigest(dataset.incidents),
   hero_metric: "sourced_cases_lacking_documented_execution_time_authorization",
   hero_count: summary.authorization_gap,
   hero_record_ids: headline.filter(E.isAuthGap).map((r) => r.id),

@@ -1,0 +1,7 @@
+# Changes to the data, to the code that counts it, to the tests and to CI need the
+# owner's review. Takes effect with branch protection's "Require review from Code Owners".
+/data/ @Jcapriola
+/js/evidence.js @Jcapriola
+/tests/ @Jcapriola
+/scripts/ @Jcapriola
+/.github/ @Jcapriola
