@@ -143,6 +143,31 @@
       }
     }
   },
+  "provenance": {
+    "verdicts": {
+      "INDEPENDENT_CONFIRMED": 0,
+      "SINGLE_ROOT": 0,
+      "INDETERMINATE": 10,
+      "NO_QUALIFYING_SOURCES": 0
+    },
+    "ids": {
+      "INDEPENDENT_CONFIRMED": [],
+      "SINGLE_ROOT": [],
+      "INDETERMINATE": [
+        "acc-2024-02-14-air-canada",
+        "acc-2024-10-29-langchain-graphcypherqachain-injection",
+        "acc-2025-06-06-al-haroun-fabricated-authorities",
+        "acc-2025-06-camoleak",
+        "acc-2025-07-18-replit-saastr",
+        "acc-2026-01-13-enclave-vm-sandbox-escape",
+        "acc-2026-01-14-cursor-agent-allowlist-bypass",
+        "acc-2026-03-safe-command-cve",
+        "acc-2026-04-09-praisonai-command-injection",
+        "acc-2026-07-15-mcp-python-sdk-task-authorization"
+      ],
+      "NO_QUALIFYING_SOURCES": []
+    }
+  },
   "sensitivity": [
     {
       "id": "R1",

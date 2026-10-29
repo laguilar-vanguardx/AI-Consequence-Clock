@@ -39,6 +39,10 @@ node tests/sensitivity.test.js
 node tests/methodology-render.test.js
 node tests/provenance.test.js
 node tests/source-graph.test.js
+node tests/consumer-policy.test.js
+node tests/provenance-history.test.js
+node tests/verify-provenance-quotes.test.js
+node tests/codeowners.test.js
 ```
 
 `derive.test.js` recomputes every published total from `data/incidents.json` and compares them against the pinned baseline in `tests/expected.json`. No dependencies, no test framework. `validate.test.js` mutates a copy of the file: a lowercase `verified` status, a `javascript:` archive URL, a PRIMARY record with no named primary document, and the geography placeholder `Unknown` must each fail validation. The live file must not. The same file mutates pairs of fields that state one fact twice, such as `rolled_back` against `reversibility`, and each contradiction must fail.
@@ -64,6 +68,7 @@ Three more tools, none required to pass:
 node tests/find-archives.js    # look up a Wayback snapshot for every source URL
 node tests/export-csv.js       # regenerate data/incidents.csv from the JSON
 node scripts/provenance-report.js   # independence audit and the annotation backlog
+node scripts/verify-provenance-quotes.js   # check each provenance quote against its archived snapshot
 ```
 
 `find-archives.js` distinguishes three outcomes and never conflates them: a snapshot was found, no snapshot exists, or the lookup failed. A failed lookup leaves the source untouched, because a dataset that separates verified from unverified must not let its own tooling record an absence it did not observe.
@@ -94,6 +99,30 @@ Every CSV row carries `verification_status`, `evidence_grade` and `in_headline_t
 
 Money columns stay separate and currency-tagged. They are read from `financial_loss_confirmed` and `financial_loss_estimated`, the same fields the page uses. `confirmed` and `estimated` are never merged into one column, because a spreadsheet will happily sum a mixed column and produce a figure no source supports. If a record carries a confirmed amount, the exporter refuses to write a CSV that omits it.
 
+## Relying on the results from another system
+
+Only one result means a record's evidence is independently confirmed: `INDEPENDENT_CONFIRMED`.
+Check for it with `isConfirmed(verdict)`, or use `relianceDecision(sourceRoots(record))`, which
+also returns stable reason codes when the answer is no. Never test for "not INDETERMINATE":
+any other value, including one added later, must mean no.
+
+`examples/consumer-policy.js` shows the full check a consumer should make. It denies by
+default, and allows only when all of these hold:
+- the versions are known;
+- the data is not the demo set;
+- the last review is recent;
+- `data/summary.json` matches the data, by totals and by both checksums;
+- the record is counted;
+- its verdict permits reliance.
+
+`dataset_checksum_sha256` covers the list of record ids. `dataset_content_sha256` covers every
+field of every record: one SHA-256 per record over its canonical JSON, then one over the sorted
+`id:hash` lines. A matching checksum proves the data and the summary agree. It does not prove
+who published them; that would need signed releases.
+
+Even `INDEPENDENT_CONFIRMED` means "confirmed under the reviewers' annotations", so a decision
+with real stakes should keep a person in the loop.
+
 ## What’s in the box
 
 | Path | Role |
@@ -117,6 +146,17 @@ Money columns stay separate and currency-tagged. They are read from `financial_l
 | `tests/methodology-render.test.js` | The methodology page renders that table escaped, and fails legibly |
 | `tests/provenance.test.js` | Source-root fixtures, properties, and validator mutations for `provenance` |
 | `tests/source-graph.test.js` | The source graph draws one box per source, escaped, with the audit's verdict |
+| `tests/validate-provenance.js` | Validation of `provenance`: shape, evidence for every claim, registered outside origins |
+| `tests/provenance-history.js` | Rejects a provenance change that is not a recorded revision; CI runs it against a PR's base |
+| `tests/provenance-history.test.js` | Tests for that rule |
+| `tests/consumer-policy.test.js` | The reference consumer denies on every broken condition, with its reason code |
+| `tests/verify-provenance-quotes.test.js` | Offline tests for the quote checker, including rate limits and outages |
+| `tests/codeowners.test.js` | Every path that decides the counts keeps a code owner |
+| `data/external-roots.json` | Registry of outside origins a source may derive from |
+| `examples/consumer-policy.js` | Reference consumer: denies by default, allows only a confirmed record from verified data |
+| `scripts/content-digest.js` | Computes the content checksum in Node |
+| `scripts/verify-provenance-quotes.js` | Checks each provenance quote against its archived snapshot. Needs the network; never blocks |
+| `.github/CODEOWNERS` | Owner review for data, counting code, tests, scripts and CI |
 | `scripts/provenance-report.js` | Prints the independence audit and the annotation backlog. Reads, never writes |
 | `docs/annotating-provenance.md` | How to annotate a source's provenance. When in doubt, `UNKNOWN` |
 | `tests/find-archives.js` | Wayback snapshot lookup for every source URL |

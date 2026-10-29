@@ -17,6 +17,13 @@ var fs = require("fs");
 var path = require("path");
 var S = require(path.join(__dirname, "schema.js"));
 var E = require(path.join(__dirname, "..", "js", "evidence.js"));
+var P = require(path.join(__dirname, "validate-provenance.js"));
+
+var REGISTRY_PATH = path.join(__dirname, "..", "data", "external-roots.json");
+
+function readRegistry() {
+  return JSON.parse(fs.readFileSync(REGISTRY_PATH, "utf8"));
+}
 
 /* Weakest first, so a higher index is a stronger grade. */
 var GRADE_ORDER = ["ROUNDUP", "INDEPENDENT_SECONDARY", "PRIMARY"];
@@ -29,9 +36,12 @@ function bestSourceGrade(sources) {
   return best === -1 ? null : GRADE_ORDER[best];
 }
 
-function validateDataset(db) {
+/* `options.registry` replaces data/external-roots.json, so tests can supply their own. */
+function validateDataset(db, options) {
   var records = (db && db.incidents) || [];
   var problems = [];
+  var warnings = [];
+  var registry = options && options.registry ? options.registry : readRegistry();
   var checked = 0;
   var archivePresent = 0;
   var archiveAbsent = 0;
@@ -107,139 +117,12 @@ function checkFeedOnlyPrimaryUrl(record, id) {
   if (!attached) fail(id, "primary_source_url is not among the attached sources");
 }
 
-/*
- * Provenance is optional. A source that declares none is UNKNOWN and is not checked.
- * One that declares it is making a claim, and a malformed claim would merge or split
- * roots silently.
- */
-function checkProvenance(record, id) {
-  var sourceIds = collectSourceIds(record, id);
-  var internalEdges = Object.create(null);
-  record.sources.forEach(function (source, si) {
-    if (!S.isPlainObject(source) || source.provenance === undefined) return;
-    var refs = checkDeclaration(source, "sources[" + si + "]", sourceIds, id);
-    if (typeof source.id === "string") internalEdges[source.id] = refs;
-  });
-  var unresolved = unresolvedDerivations(internalEdges);
-  if (unresolved.length) {
-    fail(id, "provenance has a derivation cycle; sources on it or cited from it: " + unresolved.join(", "));
-  }
-}
-
-function collectSourceIds(record, id) {
-  var sourceIds = Object.create(null);
-  record.sources.forEach(function (source, si) {
-    if (!S.isPlainObject(source) || source.id === undefined) return;
-    var where = "sources[" + si + "]";
-    if (typeof source.id !== "string" || !E.SOURCE_ID.test(source.id)) {
-      fail(id, where + ".id must be a lowercase slug of letters, digits and hyphens");
-    } else if (sourceIds[source.id]) {
-      fail(id, where + '.id "' + source.id + '" is a duplicate source id within the record');
-    } else {
-      sourceIds[source.id] = true;
-    }
-  });
-  return sourceIds;
-}
-
-function stringListOrFail(value, where, id) {
-  var isList =
-    Array.isArray(value) &&
-    value.every(function (item) {
-      return typeof item === "string";
-    });
-  if (!isList) fail(id, where + " must be an array of strings");
-  return isList ? value : [];
-}
-
-function checkDeclarationShape(source, sourceWhere, id) {
-  var where = sourceWhere + ".provenance";
-  var p = source.provenance;
-  if (!S.isPlainObject(p)) {
-    fail(id, where + " must be an object with kind, derives_from_internal, derives_from_external and optionally note");
-    return false;
-  }
-  if (source.id === undefined) {
-    fail(id, sourceWhere + ".id is required on a source that declares provenance");
-  }
-  if (E.PROVENANCE_KINDS.indexOf(p.kind) === -1) {
-    fail(id, where + '.kind has unknown value "' + p.kind + '". Allowed: ' + E.PROVENANCE_KINDS.join(", "));
-  }
-  if (p.note !== undefined && p.note !== null && typeof p.note !== "string") {
-    fail(id, where + ".note must be a string");
-  }
-  return true;
-}
-
-function checkReferenceCount(kind, count, where, id) {
-  if ((kind === "ORIGINAL" || kind === "UNKNOWN") && count > 0) {
-    fail(id, where + " is " + kind + " and must not list anything it derives from");
-  }
-  if (kind === "DERIVED" && count === 0) {
-    fail(id, where + " is DERIVED and must name at least one source or external root");
-  }
-}
-
-function checkExternalKeys(keys, where, id) {
-  keys.forEach(function (key) {
-    if (E.EXTERNAL_ROOT_KEY.test(key)) return;
-    fail(
-      id,
-      where + '.derives_from_external key "' + key + '" must look like <prefix>:<slug> with prefix in ' +
-        E.EXTERNAL_ROOT_PREFIXES.join(", ")
-    );
-  });
-}
-
-function resolvedInternalRefs(refs, source, sourceIds, where, id) {
-  var resolved = [];
-  refs.forEach(function (ref) {
-    if (ref === source.id) {
-      fail(id, where + ".derives_from_internal must not reference the source itself");
-    } else if (!sourceIds[ref]) {
-      fail(id, where + '.derives_from_internal names "' + ref + '", which is not a source id on this record');
-    } else {
-      resolved.push(ref);
-    }
-  });
-  return resolved;
-}
-
-/* Checks one declared provenance and returns the internal references that resolve. */
-function checkDeclaration(source, sourceWhere, sourceIds, id) {
-  if (!checkDeclarationShape(source, sourceWhere, id)) return [];
-  var where = sourceWhere + ".provenance";
-  var p = source.provenance;
-  var internal = stringListOrFail(p.derives_from_internal, where + ".derives_from_internal", id);
-  var external = stringListOrFail(p.derives_from_external, where + ".derives_from_external", id);
-  checkReferenceCount(p.kind, internal.length + external.length, where, id);
-  checkExternalKeys(external, where, id);
-  return resolvedInternalRefs(internal, source, sourceIds, where, id);
-}
-
-/* Kahn's algorithm. What cannot be ordered is on a derivation loop or cited from one. */
-function unresolvedDerivations(edges) {
-  var nodes = Object.keys(edges).sort();
-  var indegree = Object.create(null);
-  nodes.forEach(function (from) {
-    edges[from].forEach(function (to) {
-      if (edges[to]) indegree[to] = (indegree[to] || 0) + 1;
-    });
-  });
-  var ready = nodes.filter(function (node) {
-    return !indegree[node];
-  });
-  while (ready.length) {
-    edges[ready.shift()].forEach(function (to) {
-      if (!edges[to]) return;
-      indegree[to] -= 1;
-      if (indegree[to] === 0) ready.push(to);
-    });
-  }
-  return nodes.filter(function (node) {
-    return indegree[node] > 0;
-  });
-}
+var registryCheck = P.checkRegistry(registry);
+registryCheck.problems.forEach(function (message) {
+  fail("(registry)", message);
+});
+Array.prototype.push.apply(warnings, registryCheck.warnings);
+var provenance = P.createChecker(fail, registry);
 
 var seenIds = Object.create(null);
 
@@ -417,7 +300,7 @@ records.forEach(function (record, index) {
     checkRoundupGrades(record, id);
     checkFeedOnlyCorroboration(record, id);
     checkFeedOnlyPrimaryUrl(record, id);
-    checkProvenance(record, id);
+    provenance.checkRecord(record, id);
   }
   checked += 6;
 
@@ -516,8 +399,13 @@ records.forEach(function (record, index) {
   }
   checked++;
 
+  provenance.unusedRoots().forEach(function (key) {
+    warnings.push('registry key "' + key + '" is not used by any source');
+  });
+
   return {
     problems: problems,
+    warnings: warnings,
     checked: checked,
     archivePresent: archivePresent,
     archiveAbsent: archiveAbsent,
@@ -542,6 +430,10 @@ function report(result) {
       result.archiveUnchecked +
       " not yet checked. Run: node tests/find-archives.js"
   );
+  /* Warnings point at likely mistakes a person should look at; they never fail the build. */
+  (result.warnings || []).forEach(function (w) {
+    console.log("Warning: " + w);
+  });
   if (result.problems.length) {
     console.log("\n" + result.problems.length + " problem(s):\n");
     result.problems.forEach(function (p) {

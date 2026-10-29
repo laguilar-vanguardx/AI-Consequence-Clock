@@ -1,0 +1,33 @@
+name: provenance quotes
+
+# Manual only. It needs the network and archive.org is often slow or rate-limited, so it
+# must never block a pull request. A failed lookup is reported as failed, never as absent.
+on:
+  workflow_dispatch:
+    inputs:
+      base:
+        description: "Optional commit to compare with; only quotes added or changed since then are checked"
+        required: false
+        default: ""
+
+jobs:
+  quotes:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      # The input is read from the environment, never pasted into the script.
+      - name: Check quotes against their archived snapshots
+        env:
+          BASE: ${{ inputs.base }}
+        run: |
+          if [ -n "$BASE" ]; then
+            git fetch --depth=1 origin "$BASE"
+            git show "$BASE:data/incidents.json" > "$RUNNER_TEMP/base-incidents.json"
+            node scripts/verify-provenance-quotes.js --base "$RUNNER_TEMP/base-incidents.json"
+          else
+            node scripts/verify-provenance-quotes.js
+          fi

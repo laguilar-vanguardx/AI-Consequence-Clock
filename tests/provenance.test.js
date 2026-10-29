@@ -55,6 +55,37 @@ const derived = (internal, external) => ({
 const SECONDARY = "INDEPENDENT_SECONDARY";
 const CVE_ROOT = ["cve:CVE-2024-0001"];
 
+/*
+ * The validator requires a quote and an archived snapshot for every claim, and a
+ * registered key for every outside origin. Fixtures here test the graph, so they get
+ * well-formed evidence and a test registry added; the evidence rules have their own section.
+ */
+const TEST_REGISTRY = {
+  roots: Object.fromEntries(
+    ["cve:cve-2024-0001", "cve:cve-2026-0001", "vendor:acme-advisory", "paper:example-2026"].map((key) => [
+      key,
+      { title: "Fixture origin " + key, url: "https://origin.example/" + key.replace(":", "/") }
+    ])
+  )
+};
+const QUOTE = "Fixture quote copied from the archived source page.";
+const snapshotOf = (url) => "https://web.archive.org/web/20260101000000/" + url;
+const strings = (value) => (Array.isArray(value) ? value.filter((item) => typeof item === "string") : []);
+function withEvidence(sources) {
+  return sources.map((s) => {
+    const p = s && s.provenance;
+    if (!p || typeof p !== "object" || p.evidence !== undefined || (p.kind !== "ORIGINAL" && p.kind !== "DERIVED")) {
+      return s;
+    }
+    const claims =
+      p.kind === "ORIGINAL" ? ["original"] : strings(p.derives_from_internal).concat(strings(p.derives_from_external));
+    const basis = p.kind === "ORIGINAL" && p.original_basis === undefined ? { original_basis: "OWN_REPORTING" } : {};
+    const evidence = claims.map((claim) => ({ supports: claim, quote: QUOTE, snapshot_url: snapshotOf(s.url) }));
+    return { ...s, provenance: { ...p, ...basis, evidence } };
+  });
+}
+const validate = (db) => V.validateDataset(db, { registry: TEST_REGISTRY });
+
 function source(id, publisher, url, grade, provenance) {
   const s = {
     id,
@@ -246,7 +277,7 @@ const f3 = FIXTURES[2];
 const corroborated = dataset.incidents.find((r) => r.verification_status === "CORROBORATED");
 check(
   "the validator accepts f3's sources on a CORROBORATED record",
-  V.validateDataset({ ...dataset, incidents: [{ ...corroborated, sources: f3.sources }] }).problems,
+  validate({ ...dataset, incidents: [{ ...corroborated, sources: withEvidence(f3.sources) }] }).problems,
   []
 );
 check(
@@ -410,10 +441,11 @@ const shell = dataset.incidents.find((r) => !E.isHeadlineEligible(r));
 /* The record's grade must be the best grade among its sources, so the shell takes it from them. */
 const bestGrade = (sources) =>
   ["PRIMARY", "INDEPENDENT_SECONDARY", "ROUNDUP"].find((grade) => sources.some((s) => s.evidence_grade === grade));
-const asDataset = (sources) => ({
+const asRawDataset = (sources) => ({
   ...dataset,
   incidents: [{ ...shell, verification_status: "REPORTED", evidence_grade: bestGrade(sources), sources }]
 });
+const asDataset = (sources) => asRawDataset(withEvidence(sources));
 
 const SEEDS = Array.from({ length: 500 }, (_, i) => i + 1);
 const CASES = SEEDS.map((seed) => ({ seed, sources: randomSources(makeRandom(seed)) }));
@@ -427,7 +459,7 @@ function holds(name, property) {
 
 console.log("\nProperties over " + CASES.length + " generated records, seeds 1 to " + SEEDS.length);
 holds("every generated record with a source passes the validator", (sources) =>
-  sources.length === 0 || V.validateDataset(asDataset(sources)).problems.length === 0
+  sources.length === 0 || validate(asDataset(sources)).problems.length === 0
 );
 ok(
   "the generator reaches every verdict",
@@ -601,6 +633,77 @@ check(
   JSON.stringify(E.sourceRoots(wide))
 );
 
+console.log("\nPinned baseline (tests/expected.json)");
+const pinned = JSON.parse(fs.readFileSync(path.join(__dirname, "expected.json"), "utf8")).provenance;
+const liveAudit = E.provenanceSummary(dataset.incidents);
+check("pinned verdict counts", liveAudit.verdicts, pinned.verdicts);
+check("pinned record ids per verdict", liveAudit.ids, pinned.ids);
+
+/* ------------------------------------------------------- fail-closed reliance */
+
+console.log("\nFail-closed reliance");
+E.PROVENANCE_VERDICTS.forEach((verdict) => {
+  const expected = verdict === "INDEPENDENT_CONFIRMED";
+  check(verdict + ": isConfirmed only for INDEPENDENT_CONFIRMED", E.isConfirmed(verdict), expected);
+});
+const NOT_VERDICTS = [
+  "FUTURE_STATE",
+  "independent_confirmed",
+  " INDEPENDENT_CONFIRMED",
+  "",
+  null,
+  undefined,
+  true,
+  1,
+  {},
+  []
+];
+check(
+  "anything that is not exactly INDEPENDENT_CONFIRMED is not confirmed",
+  NOT_VERDICTS.map((value) => E.isConfirmed(value)),
+  NOT_VERDICTS.map(() => false)
+);
+check("a whole sourceRoots result is not a verdict", E.isConfirmed(rootsOf(FIXTURES[0].sources)), false);
+
+const confirmedFixture = FIXTURES[0];
+check("the confirmed fixture is relied on", E.relianceDecision(rootsOf(confirmedFixture.sources)), {
+  allowed: true,
+  verdict: "INDEPENDENT_CONFIRMED",
+  reasons: []
+});
+confirmedFixture.sources.forEach((s, i) => {
+  const stripped = confirmedFixture.sources.map((x, j) => (j === i ? { ...x, provenance: undefined } : x));
+  const decision = E.relianceDecision(rootsOf(stripped));
+  check("removing the provenance of " + s.id + " withdraws reliance", decision.allowed, false);
+});
+const pendingDecision = E.relianceDecision(rootsOf(FIXTURES[4].sources));
+check(
+  "an undetermined record says why, with stable codes and the sources to annotate",
+  [pendingDecision.allowed, pendingDecision.reasons.map((r) => r.code), pendingDecision.reasons[1].sources],
+  [false, ["NOT_CONFIRMED", "PENDING_SOURCES"], ["daily"]]
+);
+check("a missing result is not relied on", E.relianceDecision(null).allowed, false);
+const futureDecision = E.relianceDecision({ verdict: "FUTURE_STATE" });
+check("a result with an unknown verdict is not relied on", futureDecision.allowed, false);
+check(
+  "no real counted record can be relied on yet",
+  dataset.incidents.filter(E.isHeadlineEligible).filter((r) => E.relianceDecision(E.sourceRoots(r)).allowed).length,
+  0
+);
+
+const frozen = (list) => {
+  try {
+    list.push("FUTURE_STATE");
+  } catch (err) {
+    return list.indexOf("FUTURE_STATE") === -1;
+  }
+  return false;
+};
+ok("the verdict list cannot be extended at runtime", frozen(E.PROVENANCE_VERDICTS));
+const confirmedDefinition = E.verdictDefinition("INDEPENDENT_CONFIRMED");
+ok("a verdict definition cannot be rewritten at runtime", Object.isFrozen(confirmedDefinition));
+ok("the reason codes cannot be changed at runtime", Object.isFrozen(E.RELIANCE_REASONS));
+
 /* ------------------------------------------------------------ real dataset */
 
 console.log("\nReal dataset");
@@ -691,7 +794,7 @@ const VALID = () => [
 const problemsAfter = (mutate) => {
   const sources = VALID();
   mutate(sources);
-  return V.validateDataset(asDataset(sources)).problems;
+  return validate(asDataset(sources)).problems;
 };
 check("the annotated fixture is valid before mutation", problemsAfter(() => {}), []);
 check(
@@ -776,6 +879,151 @@ check(
   "a non-string id on an annotated source is reported once",
   problemsAfter((s) => (s[3].id = 7)).length,
   1
+);
+
+console.log("\nValidator: evidence for every claim");
+const P = require(path.join(__dirname, "validate-provenance.js"));
+const annotated = () => withEvidence(VALID());
+const evidenceOf = (sources, id) => provenanceOf(sources, id).evidence;
+const problemsAfterEvidence = (mutate) => {
+  const sources = annotated();
+  mutate(sources);
+  return validate(asRawDataset(sources)).problems;
+};
+check("the annotated fixture with evidence is valid", problemsAfterEvidence(() => {}), []);
+const EVIDENCE_MUTATIONS = [
+  [
+    "ORIGINAL with no evidence",
+    /evidence must list a quote and an archived snapshot/,
+    (s) => delete provenanceOf(s, "advisory").evidence
+  ],
+  [
+    "ORIGINAL with an empty evidence list",
+    /evidence must list a quote/,
+    (s) => (provenanceOf(s, "advisory").evidence = [])
+  ],
+  [
+    "ORIGINAL without a basis",
+    /original_basis must be one of/,
+    (s) => delete provenanceOf(s, "advisory").original_basis
+  ],
+  [
+    "ORIGINAL with an unknown basis",
+    /original_basis must be one of/,
+    (s) => (provenanceOf(s, "advisory").original_basis = "HUNCH")
+  ],
+  [
+    "a basis on a DERIVED source",
+    /original_basis is only for ORIGINAL/,
+    (s) => (provenanceOf(s, "wire").original_basis = "OWN_RESEARCH")
+  ],
+  [
+    "a DERIVED reference with no evidence entry",
+    /has no entry supporting "cve:cve-2026-0001"/,
+    (s) => (evidenceOf(s, "daily")[0].supports = "advisory")
+  ],
+  [
+    "evidence for something the source does not claim",
+    /"advisory" is not a claim of this source/,
+    (s) => (evidenceOf(s, "daily")[0].supports = "advisory")
+  ],
+  [
+    "a quote that is too short",
+    /quote must be 20-300 characters/,
+    (s) => (evidenceOf(s, "advisory")[0].quote = "too short")
+  ],
+  [
+    "a quote that is too long",
+    /quote must be 20-300 characters/,
+    (s) => (evidenceOf(s, "advisory")[0].quote = "x".repeat(301))
+  ],
+  [
+    "a snapshot that is not on the Wayback Machine",
+    /snapshot_url must be a https:\/\/web\.archive\.org/,
+    (s) => (evidenceOf(s, "advisory")[0].snapshot_url = "https://example.com/copy")
+  ],
+  [
+    "a snapshot of another page",
+    /capture of this source's own url/,
+    (s) => (evidenceOf(s, "advisory")[0].snapshot_url = snapshotOf("https://elsewhere.example/page"))
+  ],
+  [
+    "an unknown field in provenance",
+    /unknown field "account"/,
+    (s) => (provenanceOf(s, "advisory").account = "github:alice")
+  ],
+  ["an unknown field in an evidence entry", /unknown field "page"/, (s) => (evidenceOf(s, "advisory")[0].page = 4)],
+  [
+    "evidence on an UNKNOWN source",
+    /evidence is only for ORIGINAL and DERIVED/,
+    (s) => (provenanceOf(s, "mirror").evidence = [])
+  ],
+  [
+    "an outside origin that is not registered",
+    /"vendor:made-up-advisory" is not registered/,
+    (s) => {
+      provenanceOf(s, "daily").derives_from_external = ["vendor:made-up-advisory"];
+      evidenceOf(s, "daily")[0].supports = "vendor:made-up-advisory";
+    }
+  ],
+  [
+    "a cve key that is not a CVE id",
+    /cve key like cve:cve-2024-0001/,
+    (s) => {
+      provenanceOf(s, "daily").derives_from_external = ["cve:2026-1"];
+      evidenceOf(s, "daily")[0].supports = "cve:2026-1";
+    }
+  ]
+];
+EVIDENCE_MUTATIONS.forEach(([name, pattern, mutate]) => {
+  ok(name + " fails validation", problemsAfterEvidence(mutate).some((p) => pattern.test(p)));
+});
+check(
+  "a snapshot stored with http, www and a trailing slash still matches its source",
+  problemsAfterEvidence((s) => {
+    evidenceOf(s, "advisory")[0].snapshot_url = snapshotOf("http://www.vendor.example/advisory/1/");
+  }),
+  []
+);
+check(
+  "registered keys match without regard to case",
+  problemsAfterEvidence((s) => {
+    provenanceOf(s, "daily").derives_from_external = ["cve:CVE-2026-0001"];
+    evidenceOf(s, "daily")[0].supports = "cve:CVE-2026-0001";
+  }),
+  []
+);
+
+console.log("\nValidator: the outside-origin registry");
+const registryWith = (roots) => ({ roots });
+const origin = (key) => ({ title: "Origin " + key, url: "https://origin.example/" + key });
+const publishedRegistry = require(path.join(__dirname, "..", "data", "external-roots.json"));
+check("the published registry is well formed", P.checkRegistry(publishedRegistry), {
+  problems: [],
+  warnings: []
+});
+const REGISTRY_MUTATIONS = [
+  ["a registry that is not an object of roots", { entries: [] }, /must be an object with a "roots" object/],
+  ["an uppercase key", registryWith({ "CVE:CVE-2026-0001": origin("x") }), /must be lowercase/],
+  ["a malformed cve key", registryWith({ "cve:2026-1": origin("x") }), /cve key like/],
+  ["an entry without a title", registryWith({ "vendor:acme": { url: "https://acme.example" } }), /needs a title/],
+  ["an entry without a url", registryWith({ "vendor:acme": { title: "Acme advisory" } }), /needs an http or https url/]
+];
+REGISTRY_MUTATIONS.forEach(([name, registry, pattern]) => {
+  ok(name + " fails", P.checkRegistry(registry).problems.some((p) => pattern.test(p)));
+});
+check(
+  "two keys that differ only by leading zeros are flagged as a likely duplicate",
+  P.checkRegistry(registryWith({ "cve:cve-2026-0001": origin("a"), "cve:cve-2026-00001": origin("b") })).warnings
+    .length,
+  1
+);
+const unusedRegistry = { roots: { ...TEST_REGISTRY.roots, "vendor:never-cited": origin("never") } };
+ok(
+  "a registered key nothing cites is reported as a warning",
+  V.validateDataset(asDataset(VALID()), { registry: unusedRegistry }).warnings.some((w) =>
+    /"vendor:never-cited" is not used/.test(w)
+  )
 );
 
 console.log("\n" + "-".repeat(64));

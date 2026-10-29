@@ -421,6 +421,9 @@ if (fs.existsSync(publishedPath)) {
   check("summary.json eligible count", published.eligible_record_count, summary.headline_count);
   check("summary.json hero count", published.hero_count, summary.authorization_gap);
   check("summary.json checksum", published.dataset_checksum_sha256, digest);
+  const { contentDigest } = require(path.join(__dirname, "..", "scripts", "content-digest.js"));
+  const content = contentDigest(records);
+  check("summary.json content checksum", published.dataset_content_sha256, content);
   check("summary.json headline rule is unchanged", published.headline_rule, dataset.headline_rule);
   const provenance = E.comparePublishedSummary(summary, published, digest);
   check("footer provenance reports a full summary match", provenance.status, "matches");
@@ -428,6 +431,32 @@ if (fs.existsSync(publishedPath)) {
   check("footer provenance distinguishes a failed summary fetch", noSummary.status, "unavailable");
   const noCrypto = E.comparePublishedSummary(summary, published, "unavailable in this context");
   check("footer provenance distinguishes unavailable crypto", noCrypto.status, "matches_without_checksum");
+  const both = E.comparePublishedSummary(summary, published, { idDigest: digest, contentDigest: content });
+  check("footer provenance matches with both checksums", both.status, "matches");
+
+  /*
+   * An edit to a record's text keeps the same ids, so the id checksum cannot see it. The
+   * content checksum must, and must say which published field disagrees.
+   */
+  const retitled = records.map((r, i) => (i === 0 ? { ...r, title: r.title + " (edited)" } : r));
+  const retitledIds = require("crypto")
+    .createHash("sha256")
+    .update(retitled.map((r) => r.id).sort().join(","))
+    .digest("hex");
+  check("an edited title leaves the id checksum unchanged", retitledIds, digest);
+  ok("an edited title changes the content checksum", contentDigest(retitled) !== content);
+  const edited = E.comparePublishedSummary(summary, published, {
+    idDigest: retitledIds,
+    contentDigest: contentDigest(retitled)
+  });
+  check("footer provenance reports the edited content", [edited.status, edited.mismatches], [
+    "differs",
+    ["dataset_content_sha256"]
+  ]);
+  ok(
+    "the content checksum does not depend on key order inside a record",
+    contentDigest(records.map((r) => Object.fromEntries(Object.entries(r).reverse()))) === content
+  );
 
   if (headline.length > 0) {
     const victim = headline[0].id;
